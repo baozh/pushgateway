@@ -136,7 +136,7 @@ func (dms *DiskMetricStore) Ready() error {
 }
 
 // GetMetricFamilies implements the MetricStore interface.
-func (dms *DiskMetricStore) GetMetricFamilies() []*dto.MetricFamily {
+func (dms *DiskMetricStore) GetMetricFamilies(lastSec int) []*dto.MetricFamily {
 	dms.lock.RLock()
 	defer dms.lock.RUnlock()
 
@@ -145,6 +145,10 @@ func (dms *DiskMetricStore) GetMetricFamilies() []*dto.MetricFamily {
 
 	for _, group := range dms.metricGroups {
 		for name, tmf := range group.Metrics {
+			if lastSec > 0 && time.Now().Sub(tmf.Timestamp) > time.Duration(lastSec) * time.Second {
+				continue
+			}
+
 			mf := tmf.GetMetricFamily()
 			if mf == nil {
 				level.Warn(dms.logger).Log("msg", "storage corruption detected, consider wiping the persistence file")
@@ -184,6 +188,29 @@ func (dms *DiskMetricStore) GetMetricFamilies() []*dto.MetricFamily {
 		}
 	}
 	return result
+}
+
+func (dms *DiskMetricStore) GetMetricFamiliesMapLastSec(lastSec int) GroupingKeyToMetricGroup {
+	dms.lock.RLock()
+	defer dms.lock.RUnlock()
+	groupsCopy := GroupingKeyToMetricGroup{}
+	for k, g := range dms.metricGroups {
+		metricsCopy := make(NameToTimestampedMetricFamilyMap, len(g.Metrics))
+		isValid := false
+		for n, tmf := range g.Metrics {
+			level.Info(dms.logger).Log("debug", fmt.Sprintf("metric_name:%s, ts:%s",n, tmf.Timestamp.String()))
+			if time.Now().Sub(tmf.Timestamp) <= time.Duration(lastSec) * time.Second {
+				if !isValid {
+					isValid = true
+				}
+				metricsCopy[n] = tmf
+			}
+		}
+		if isValid {
+			groupsCopy[k] = MetricGroup{Labels: g.Labels, Metrics: metricsCopy}
+		}
+	}
+	return groupsCopy
 }
 
 // GetMetricFamiliesMap implements the MetricStore interface.
@@ -382,7 +409,7 @@ func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool {
 	tg := prometheus.Gatherers{
 		prometheus.DefaultGatherer,
 		prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
-			return tdms.GetMetricFamilies(), nil
+			return tdms.GetMetricFamilies(0), nil
 		}),
 	}
 	if _, err = tg.Gather(); err != nil {

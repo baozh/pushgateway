@@ -38,7 +38,7 @@ type MetricStore interface {
 	// Metrics. Inconsistent help strings are logged, and one of the
 	// versions will "win". Inconsistent types and inconsistent or duplicate
 	// label sets will go undetected.
-	GetMetricFamilies() []*dto.MetricFamily
+	GetMetricFamilies(lastSec int) []*dto.MetricFamily
 	// GetMetricFamiliesMap returns a map grouping-key -> MetricGroup. The
 	// MetricFamily pointed to by the Metrics map in each MetricGroup is
 	// guaranteed to not be modified by the MetricStore anymore. However,
@@ -47,6 +47,8 @@ type MetricStore interface {
 	// deep copy of the internal state of the MetricStore and completely
 	// owned by the caller.
 	GetMetricFamiliesMap() GroupingKeyToMetricGroup
+	GetMetricFamiliesMapLastSec(lastSec int) GroupingKeyToMetricGroup
+
 	// Shutdown must only be called after the caller has made sure that
 	// SubmitWriteRequests is not called anymore. (If it is called later,
 	// the request might get submitted, but not processed anymore.) The

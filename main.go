@@ -69,6 +69,8 @@ func main() {
 		persistenceFile     = app.Flag("persistence.file", "File to persist metrics. If empty, metrics are only kept in memory.").Default("").String()
 		persistenceInterval = app.Flag("persistence.interval", "The minimum interval at which to write out the persistence file.").Default("5m").Duration()
 		pushUnchecked       = app.Flag("push.disable-consistency-check", "Do not check consistency of pushed metrics. DANGEROUS.").Default("false").Bool()
+		keepLastSec 		= app.Flag("keep.last.sec", "keep last second metric date").Default("60").Int()
+
 		promlogConfig       = promlog.Config{}
 	)
 	promlogflag.AddFlags(app, &promlogConfig)
@@ -101,7 +103,7 @@ func main() {
 	// Create a Gatherer combining the DefaultGatherer and the metrics from the metric store.
 	g := prometheus.Gatherers{
 		prometheus.DefaultGatherer,
-		prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) { return ms.GetMetricFamilies(), nil }),
+		prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) { return ms.GetMetricFamilies(*keepLastSec), nil }),
 	}
 
 	r := route.New()
@@ -186,6 +188,7 @@ func main() {
 
 	av1 := route.New()
 	apiv1.Register(av1)
+	apiv1.SetKeepLastSec(*keepLastSec)
 	if *enableAdminAPI {
 		av1.Put("/admin/wipe", handler.WipeMetricStore(ms, logger).ServeHTTP)
 	}
