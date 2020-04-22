@@ -79,6 +79,7 @@ type API struct {
 	Flags       map[string]string
 	StartTime   time.Time
 	BuildInfo   map[string]string
+	KeepLastSec   int
 }
 
 // New returns a new API. The log.Logger can be nil, in which case no logging is performed.
@@ -99,6 +100,10 @@ func New(
 		Flags:       flags,
 		BuildInfo:   buildInfo,
 	}
+}
+
+func (api *API) SetKeepLastSec(secs int) {
+	api.KeepLastSec = secs
 }
 
 // Register registers the API handlers under their correct routes
@@ -128,7 +133,13 @@ type metrics struct {
 }
 
 func (api *API) metrics(w http.ResponseWriter, r *http.Request) {
-	familyMaps := api.MetricStore.GetMetricFamiliesMap()
+	familyMaps := storage.GroupingKeyToMetricGroup{}
+	if api.KeepLastSec > 0 {
+		familyMaps = api.MetricStore.GetMetricFamiliesMapLastSec(api.KeepLastSec)
+	} else {
+		familyMaps = api.MetricStore.GetMetricFamiliesMap()
+	}
+
 	res := []interface{}{}
 	for _, v := range familyMaps {
 		metricResponse := map[string]interface{}{}
