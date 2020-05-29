@@ -39,7 +39,7 @@ const (
 	pushMetricHelp       = "Last Unix time when changing this group in the Pushgateway succeeded."
 	pushFailedMetricName = "push_failure_time_seconds"
 	pushFailedMetricHelp = "Last Unix time when changing this group in the Pushgateway failed."
-	writeQueueCapacity   = 1000
+	writeQueueCapacity   = 10240
 )
 
 var errTimestamp = errors.New("pushed metrics must not have timestamps")
@@ -106,7 +106,11 @@ func NewDiskMetricStore(
 
 // SubmitWriteRequest implements the MetricStore interface.
 func (dms *DiskMetricStore) SubmitWriteRequest(req WriteRequest) {
-	dms.writeQueue <- req
+	select {
+	case dms.writeQueue <- req:
+	default:
+		level.Info(dms.logger).Log("msg", "writeQueue full, so drop write request!", "req", req)
+	}
 }
 
 // Shutdown implements the MetricStore interface.
@@ -222,7 +226,7 @@ func (dms *DiskMetricStore) GetMetricFamiliesMap() GroupingKeyToMetricGroup {
 		metricsCopy := make(NameToTimestampedMetricFamilyMap, len(g.Metrics))
 		groupsCopy[k] = MetricGroup{Labels: g.Labels, Metrics: metricsCopy}
 		for n, tmf := range g.Metrics {
-			metricsCopy[n] = tmf
+			metricsCopy[n] = tmf  // 引用了dto.MetricFamily指针，要保证 dto.MetricFamily 对象内部的成员在别的协程不能被修改。
 		}
 	}
 	return groupsCopy
@@ -289,6 +293,7 @@ func (dms *DiskMetricStore) loop(persistenceInterval time.Duration) {
 }
 
 func (dms *DiskMetricStore) processWriteRequest(wr WriteRequest) {
+	// 将wr中的metric数据 拷贝进 dms
 	dms.lock.Lock()
 	defer dms.lock.Unlock()
 
@@ -311,6 +316,7 @@ func (dms *DiskMetricStore) processWriteRequest(wr WriteRequest) {
 	} else if wr.Replace {
 		// For replace, we have to delete all metric families in the
 		// group except pre-existing push timestamps.
+		// bzh: 如果group key已存在，则会删除 这个group key下的所有metric数据。why?
 		for name := range group.Metrics {
 			if name != pushMetricName && name != pushFailedMetricName {
 				delete(group.Metrics, name)
@@ -324,6 +330,9 @@ func (dms *DiskMetricStore) processWriteRequest(wr WriteRequest) {
 		wr.MetricFamilies[pushFailedMetricName] = newPushFailedTimestampGauge(wr.Labels, time.Time{})
 	}
 	for name, mf := range wr.MetricFamilies {
+		// 会覆盖这个metric name的所有数据。why???
+		// 多个实例，上报同一个metric name，就覆盖了？不会，labels[]中会加个job参数，每个实例上报的job是不同的。
+		// todo: 如果有相同的，应尽量做数据归并。
 		group.Metrics[name] = TimestampedMetricFamily{
 			Timestamp:            wr.Timestamp,
 			GobbableMetricFamily: (*GobbableMetricFamily)(mf),
@@ -369,7 +378,7 @@ func (dms *DiskMetricStore) setPushFailedTimestamp(wr WriteRequest) {
 // Special case: If the WriteRequest has no Done channel set, the (expensive)
 // consistency check is skipped. The WriteRequest is still sanitized, and the
 // presence of timestamps still results in returning false.
-func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool {
+func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool { // bzh: 1, sanitize, 2: 一致性检查
 	if wr.MetricFamilies == nil {
 		// Delete request cannot create inconsistencies, and nothing has
 		// to be sanitized.
@@ -384,7 +393,7 @@ func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool {
 	}()
 
 	if timestampsPresent(wr.MetricFamilies) {
-		err = errTimestamp
+		err = errTimestamp   // metricFamily中不能含有timestampMs
 		return false
 	}
 	for _, mf := range wr.MetricFamilies {
@@ -399,20 +408,21 @@ func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool {
 	// Construct a test dms, acting on a copy of the metrics, to test the
 	// WriteRequest with.
 	tdms := &DiskMetricStore{
-		metricGroups:   dms.GetMetricFamiliesMap(),
+		metricGroups:   dms.GetMetricFamiliesMap(),  // diskStore 当前已存在的所有metric数据，复制一份（但是持有的是map引用，不能并发访问）
 		predefinedHelp: dms.predefinedHelp,
 		logger:         log.NewNopLogger(),
 	}
-	tdms.processWriteRequest(wr)
+	tdms.processWriteRequest(wr)    // 将wr中的metric数据 拷贝进 tdms
 
 	// Construct a test Gatherer to check if consistent gathering is possible.
 	tg := prometheus.Gatherers{
-		prometheus.DefaultGatherer,
+		prometheus.DefaultGatherer,   // 本地的register，用来收集PushGateway产生的metric数据
 		prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
 			return tdms.GetMetricFamilies(0), nil
 		}),
 	}
 	if _, err = tg.Gather(); err != nil {
+		level.Info(dms.logger).Log("msg", "gather failed in DiskMatricStore", "err", err)
 		return false
 	}
 	return true
@@ -560,7 +570,7 @@ func newTimestampGauge(name, help string, groupingLabels map[string]string, t ti
 // Finally, sanitizeLabels sorts the label pairs of all metrics.
 func sanitizeLabels(mf *dto.MetricFamily, groupingLabels map[string]string) {
 	gLabelsNotYetDone := make(map[string]string, len(groupingLabels))
-
+	// 设置metric的label，把 预置的groupLabels、instanceLabel 覆盖进去。
 metric:
 	for _, m := range mf.GetMetric() {
 		for ln, lv := range groupingLabels {

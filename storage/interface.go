@@ -153,7 +153,7 @@ type NameToTimestampedMetricFamilyMap map[string]TimestampedMetricFamily
 // TimestampedMetricFamily adds the push timestamp to a gobbable version of the
 // MetricFamily-DTO.
 type TimestampedMetricFamily struct {
-	Timestamp            time.Time
+	Timestamp            time.Time // writeRequest中的timestamp
 	GobbableMetricFamily *GobbableMetricFamily
 }
 
