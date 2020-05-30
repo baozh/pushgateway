@@ -63,7 +63,7 @@ func Push(
 			var err error
 			if job, err = decodeBase64(job); err != nil {
 				http.Error(w, fmt.Sprintf("invalid base64 encoding in job name %q: %v", job, err), http.StatusBadRequest)
-				level.Debug(logger).Log("msg", "invalid base64 encoding in job name", "job", job, "err", err.Error())
+				level.Error(logger).Log("msg", "invalid base64 encoding in job name", "job", job, "err", err.Error())
 				return
 			}
 		}
@@ -73,12 +73,12 @@ func Push(
 		labels, err := splitLabels(labelsString)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
-			level.Debug(logger).Log("msg", "failed to parse URL", "url", labelsString, "err", err.Error())
+			level.Error(logger).Log("msg", "failed to parse URL", "url", labelsString, "err", err.Error())
 			return
 		}
 		if job == "" {
 			http.Error(w, "job name is required", http.StatusBadRequest)
-			level.Debug(logger).Log("msg", "job name is required")
+			level.Error(logger).Log("msg", "job name is required")
 			return
 		}
 		labels["job"] = job
@@ -108,10 +108,19 @@ func Push(
 		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
-			level.Debug(logger).Log("msg", "failed to parse text", "err", err.Error())
+			level.Error(logger).Log("msg", "failed to parse text", "err", err.Error())
 			return
 		}
+
 		now := time.Now()
+		for _, mf := range metricFamilies {
+			RecvMetricCnt.With(map[string]string{"metric_name": *mf.Name, "job": job}).Add(float64(len(mf.Metric)))
+			//if strings.Contains(*mf.Name, "gm_backend") {
+			//	fmt.Printf("recv_push_metric: ts:%s, job:%s, metric_name:%s, metrics_len:%d\n",
+			//		now.Format("2006-01-02 15:04:05"), job, *mf.Name, len(mf.Metric))
+			//}
+		}
+
 		if !check {
 			ms.SubmitWriteRequest(storage.WriteRequest{
 				Labels:         labels,

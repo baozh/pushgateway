@@ -109,6 +109,10 @@ func (dms *DiskMetricStore) SubmitWriteRequest(req WriteRequest) {
 	select {
 	case dms.writeQueue <- req:
 	default:
+		for _, mf := range req.MetricFamilies {
+			fmt.Printf("recv_push_metric: writeQueue full, so drop write request! ts:%s, metric_name:%s, metrics_len:%d\n",
+				req.Timestamp.String(), mf.Name, len(mf.Metric))
+		}
 		level.Info(dms.logger).Log("msg", "writeQueue full, so drop write request!", "req", req)
 	}
 }
@@ -117,6 +121,13 @@ func (dms *DiskMetricStore) SubmitWriteRequest(req WriteRequest) {
 func (dms *DiskMetricStore) Shutdown() error {
 	close(dms.drain)
 	return <-dms.done
+}
+
+func (dms *DiskMetricStore) ToProcessPushItem() int {
+	dms.lock.Lock()
+	defer dms.lock.Unlock()
+
+	return len(dms.writeQueue)
 }
 
 // Healthy implements the MetricStore interface.
@@ -290,6 +301,13 @@ func (dms *DiskMetricStore) loop(persistenceInterval time.Duration) {
 			}
 		}
 	}
+}
+
+func (dms *DiskMetricStore) ClearStore() {
+	fmt.Printf("ts:%s, clear store!\n")
+	dms.lock.Lock()
+	defer dms.lock.Unlock()
+	dms.metricGroups = GroupingKeyToMetricGroup{}
 }
 
 func (dms *DiskMetricStore) processWriteRequest(wr WriteRequest) {

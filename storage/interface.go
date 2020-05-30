@@ -67,6 +67,7 @@ type MetricStore interface {
 	// are opened and checkpoints have been restored). Otherwise, a non-nil
 	// error is returned.
 	Ready() error
+	ToProcessPushItem() int
 }
 
 // WriteRequest is a request to change the MetricStore, i.e. to process it, a

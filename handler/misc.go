@@ -14,6 +14,7 @@
 package handler
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 
@@ -36,6 +37,16 @@ func Healthy(ms storage.MetricStore) http.Handler {
 			} else {
 				http.Error(w, err.Error(), 500)
 			}
+		}),
+	)
+}
+
+func ChanLen(ms storage.MetricStore) http.Handler {
+	return InstrumentWithCounter(
+		"channel-len",
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			l := ms.ToProcessPushItem()
+			io.WriteString(w, fmt.Sprintf("to_process_items:%d", l))
 		}),
 	)
 }
