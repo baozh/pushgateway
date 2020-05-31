@@ -12,11 +12,11 @@ to a Pushgateway. The Pushgateway then exposes these metrics to
 Prometheus.
 
 ## Note
-1、修复了 `diskmetricstore` 中 `SubmitWriteRequest`阻塞的问题。
-2、优化`diskmetricstore`处理 writeRequest的性能（单协程-> 多协程），更好得利用多核。
-3、加了一个 `keep.last.sec` option，Prometheus来拉取时，只取最近 `keep.last.sec` 的Metrics数据。
-4、修改了 `/metrics` 接口的逻辑：在拉取完metric数据后，清空`本地diskmetricstore`中的metric数据。 
-5、加上一些日志、指标`pushgateway_recv_metric`、`pushgateway_proxy_metric`，方便排障。
+1、修复了 `diskmetricstore` 中 `SubmitWriteRequest`阻塞的问题。  
+2、优化`diskmetricstore`处理 writeRequest的性能（单协程-> 多协程），更好得利用多核。  
+3、加了一个 `keep.last.sec` option，Prometheus来拉取时，只取最近 `keep.last.sec` 的Metrics数据。  
+4、修改了 `/metrics` 接口的逻辑：在拉取完metric数据后，清空`本地diskmetricstore`中的metric数据。  
+5、加上一些日志、指标`pushgateway_recv_metric`、`pushgateway_proxy_metric`，方便排障。  
 
 ## Non-goals
 
