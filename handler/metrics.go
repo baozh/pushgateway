@@ -24,14 +24,14 @@ import (
 var (
 	RecvMetricCnt = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "recv_metric",
+			Name: "pushgateway_recv_metric",
 			Help: "Total HTTP requests processed by the Pushgateway, excluding scrapes.",
 		},
 		[]string{"metric_name", "job"},
 	)
 	ProxyMetricCnt = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "proxy_metric",
+			Name: "pushgateway_proxy_metric",
 			Help: "Total HTTP requests processed by the Pushgateway, excluding scrapes.",
 		},
 		[]string{"metric_name", "job"},

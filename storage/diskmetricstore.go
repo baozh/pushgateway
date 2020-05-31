@@ -399,7 +399,7 @@ func (dms *DiskMetricStore) processWriteRequest(wr WriteRequest) {
 	for name, mf := range wr.MetricFamilies {
 		// 会覆盖这个metric name的所有数据。why???
 		// 多个实例，上报同一个metric name，就覆盖了？不会，labels[]中会加个job参数，每个实例上报的job是不同的。
-		// todo: 如果有相同的，应尽量做数据归并。
+		// 如果有相同的，应尽量做数据归并? 不需要，因为客户端每次上报会累计历史数据metric。
 		group.Metrics[name] = TimestampedMetricFamily{
 			Timestamp:            wr.Timestamp,
 			GobbableMetricFamily: (*GobbableMetricFamily)(mf),

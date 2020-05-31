@@ -113,7 +113,7 @@ type GroupingKeyToMetricGroup map[string]MetricGroup
 
 // MetricGroup adds the grouping labels to a NameToTimestampedMetricFamilyMap.
 type MetricGroup struct {
-	Lock    sync.RWMutex // Protects metricFamilies.
+	Lock    sync.RWMutex // Protects Metrics
 	Labels  map[string]string
 	Metrics NameToTimestampedMetricFamilyMap
 }
