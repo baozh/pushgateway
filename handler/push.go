@@ -122,7 +122,7 @@ func Push(
 		}
 
 		if !check {
-			ms.SubmitWriteRequest(storage.WriteRequest{
+			ms.SubmitWriteRequestFromJob(job, storage.WriteRequest{
 				Labels:         labels,
 				Timestamp:      now,
 				MetricFamilies: metricFamilies,
@@ -133,7 +133,7 @@ func Push(
 		}
 		errCh := make(chan error, 1)
 		errReceived := false
-		ms.SubmitWriteRequest(storage.WriteRequest{
+		ms.SubmitWriteRequestFromJob(job, storage.WriteRequest{
 			Labels:         labels,
 			Timestamp:      now,
 			MetricFamilies: metricFamilies,

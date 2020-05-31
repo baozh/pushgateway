@@ -79,7 +79,7 @@ type API struct {
 	Flags       map[string]string
 	StartTime   time.Time
 	BuildInfo   map[string]string
-	KeepLastSec   int
+	KeepLastSec int
 }
 
 // New returns a new API. The log.Logger can be nil, in which case no logging is performed.

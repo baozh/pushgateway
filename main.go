@@ -34,8 +34,8 @@ import (
 	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/promlog"
 	gom "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/common/version"
 	"gopkg.in/alecthomas/kingpin.v2"
@@ -74,9 +74,10 @@ func main() {
 		persistenceFile     = app.Flag("persistence.file", "File to persist metrics. If empty, metrics are only kept in memory.").Default("").String()
 		persistenceInterval = app.Flag("persistence.interval", "The minimum interval at which to write out the persistence file.").Default("5m").Duration()
 		pushUnchecked       = app.Flag("push.disable-consistency-check", "Do not check consistency of pushed metrics. DANGEROUS.").Default("false").Bool()
-		keepLastSec 		= app.Flag("keep.last.sec", "keep last second metric date").Default("60").Int()
+		keepLastSec         = app.Flag("keep.last.sec", "keep last second metric date").Default("60").Int()
+		processNum          = app.Flag("process.num", "process num").Default("24").Int()
 
-		promlogConfig       = promlog.Config{}
+		promlogConfig = promlog.Config{}
 	)
 	promlogflag.AddFlags(app, &promlogConfig)
 	app.Version(version.Print("pushgateway"))
@@ -103,7 +104,7 @@ func main() {
 		}
 	}
 
-	ms := storage.NewDiskMetricStore(*persistenceFile, *persistenceInterval, prometheus.DefaultGatherer, logger)
+	ms := storage.NewDiskMetricStore(*persistenceFile, *persistenceInterval, prometheus.DefaultGatherer, logger, *processNum)
 
 	// Create a Gatherer combining the DefaultGatherer and the metrics from the metric store.
 	g := prometheus.Gatherers{
@@ -304,7 +305,7 @@ func HandlerFor(ms *storage.DiskMetricStore, needClear bool, reg prometheus.Gath
 	}
 
 	h := http.HandlerFunc(func(rsp http.ResponseWriter, req *http.Request) {
-		defer func(){
+		defer func() {
 			if needClear {
 				ms.ClearStore()
 			}
@@ -397,7 +398,7 @@ func HandlerFor(ms *storage.DiskMetricStore, needClear bool, reg prometheus.Gath
 			}
 			handler.ProxyMetricCnt.With(map[string]string{"metric_name": *mf.Name, "job": job}).Add(float64(len(mf.Metric)))
 			fmt.Printf("ts:%s, proxy_metric: job:%s, metric_name:%s, metrics_len:%d\n",
-												time.Now().Format("2006-01-02 15:04:05"), job, *mf.Name, len(mf.Metric))
+				time.Now().Format("2006-01-02 15:04:05"), job, *mf.Name, len(mf.Metric))
 			if handleError(enc.Encode(mf)) {
 				return
 			}

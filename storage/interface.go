@@ -15,6 +15,7 @@ package storage
 
 import (
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -29,6 +30,7 @@ type MetricStore interface {
 	// guarantee when a request will be processed, but it is guaranteed that
 	// the requests are processed in the order of submission.
 	SubmitWriteRequest(req WriteRequest)
+	SubmitWriteRequestFromJob(job string, req WriteRequest)
 	// GetMetricFamilies returns all the currently saved MetricFamilies. The
 	// returned MetricFamilies are guaranteed to not be modified by the
 	// MetricStore anymore. However, they may still be read somewhere else,
@@ -111,6 +113,7 @@ type GroupingKeyToMetricGroup map[string]MetricGroup
 
 // MetricGroup adds the grouping labels to a NameToTimestampedMetricFamilyMap.
 type MetricGroup struct {
+	Lock    sync.RWMutex // Protects metricFamilies.
 	Labels  map[string]string
 	Metrics NameToTimestampedMetricFamilyMap
 }

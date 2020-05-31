@@ -59,7 +59,7 @@ func Delete(ms storage.MetricStore, jobBase64Encoded bool, logger log.Logger) fu
 				return
 			}
 			labels["job"] = job
-			ms.SubmitWriteRequest(storage.WriteRequest{
+			ms.SubmitWriteRequestFromJob(job, storage.WriteRequest{
 				Labels:    labels,
 				Timestamp: time.Now(),
 			})
