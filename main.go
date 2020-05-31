@@ -38,7 +38,6 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	promlogflag "github.com/prometheus/common/promlog/flag"
-
 	api_v1 "github.com/prometheus/pushgateway/api/v1"
 	"github.com/prometheus/pushgateway/asset"
 	"github.com/prometheus/pushgateway/handler"
@@ -69,7 +68,10 @@ func main() {
 		persistenceFile     = app.Flag("persistence.file", "File to persist metrics. If empty, metrics are only kept in memory.").Default("").String()
 		persistenceInterval = app.Flag("persistence.interval", "The minimum interval at which to write out the persistence file.").Default("5m").Duration()
 		pushUnchecked       = app.Flag("push.disable-consistency-check", "Do not check consistency of pushed metrics. DANGEROUS.").Default("false").Bool()
-		promlogConfig       = promlog.Config{}
+		keepLastSec         = app.Flag("keep.last.sec", "keep last second metric date").Default("60").Int()
+		processNum          = app.Flag("process.num", "process num").Default("24").Int()
+
+		promlogConfig = promlog.Config{}
 	)
 	promlogflag.AddFlags(app, &promlogConfig)
 	app.Version(version.Print("pushgateway"))
@@ -96,20 +98,32 @@ func main() {
 		}
 	}
 
-	ms := storage.NewDiskMetricStore(*persistenceFile, *persistenceInterval, prometheus.DefaultGatherer, logger)
+	ms := storage.NewDiskMetricStore(*persistenceFile, *persistenceInterval, prometheus.DefaultGatherer, logger, *processNum)
 
 	// Create a Gatherer combining the DefaultGatherer and the metrics from the metric store.
 	g := prometheus.Gatherers{
 		prometheus.DefaultGatherer,
-		prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) { return ms.GetMetricFamilies(), nil }),
+		prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) { return ms.GetMetricFamilies(*keepLastSec), nil }),
 	}
 
 	r := route.New()
 	r.Get(*routePrefix+"/-/healthy", handler.Healthy(ms).ServeHTTP)
+	r.Get(*routePrefix+"/-/chan-len", handler.ChanLen(ms).ServeHTTP)
 	r.Get(*routePrefix+"/-/ready", handler.Ready(ms).ServeHTTP)
 	r.Get(
 		path.Join(*routePrefix, *metricsPath),
-		promhttp.HandlerFor(g, promhttp.HandlerOpts{
+		HandlerFor(ms, true, g, promhttp.HandlerOpts{
+			ErrorLog: logFunc(level.Error(logger).Log),
+		}).ServeHTTP,
+	)
+
+	gO := prometheus.Gatherers{
+		prometheus.DefaultGatherer,
+		prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) { return ms.GetMetricFamilies(0), nil }),
+	}
+	r.Get(
+		*routePrefix+"/metrics-all",
+		HandlerFor(ms, false, gO, promhttp.HandlerOpts{
 			ErrorLog: logFunc(level.Error(logger).Log),
 		}).ServeHTTP,
 	)
@@ -186,6 +200,7 @@ func main() {
 
 	av1 := route.New()
 	apiv1.Register(av1)
+	apiv1.SetKeepLastSec(*keepLastSec)
 	if *enableAdminAPI {
 		av1.Put("/admin/wipe", handler.WipeMetricStore(ms, logger).ServeHTTP)
 	}

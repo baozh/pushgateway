@@ -15,6 +15,7 @@ package storage
 
 import (
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -29,6 +30,7 @@ type MetricStore interface {
 	// guarantee when a request will be processed, but it is guaranteed that
 	// the requests are processed in the order of submission.
 	SubmitWriteRequest(req WriteRequest)
+	SubmitWriteRequestFromJob(job string, req WriteRequest)
 	// GetMetricFamilies returns all the currently saved MetricFamilies. The
 	// returned MetricFamilies are guaranteed to not be modified by the
 	// MetricStore anymore. However, they may still be read somewhere else,
@@ -38,7 +40,7 @@ type MetricStore interface {
 	// Metrics. Inconsistent help strings are logged, and one of the
 	// versions will "win". Inconsistent types and inconsistent or duplicate
 	// label sets will go undetected.
-	GetMetricFamilies() []*dto.MetricFamily
+	GetMetricFamilies(lastSec int) []*dto.MetricFamily
 	// GetMetricFamiliesMap returns a map grouping-key -> MetricGroup. The
 	// MetricFamily pointed to by the Metrics map in each MetricGroup is
 	// guaranteed to not be modified by the MetricStore anymore. However,
@@ -47,6 +49,8 @@ type MetricStore interface {
 	// deep copy of the internal state of the MetricStore and completely
 	// owned by the caller.
 	GetMetricFamiliesMap() GroupingKeyToMetricGroup
+	GetMetricFamiliesMapLastSec(lastSec int) GroupingKeyToMetricGroup
+
 	// Shutdown must only be called after the caller has made sure that
 	// SubmitWriteRequests is not called anymore. (If it is called later,
 	// the request might get submitted, but not processed anymore.) The
@@ -65,6 +69,7 @@ type MetricStore interface {
 	// are opened and checkpoints have been restored). Otherwise, a non-nil
 	// error is returned.
 	Ready() error
+	ToProcessPushItem() int
 }
 
 // WriteRequest is a request to change the MetricStore, i.e. to process it, a
@@ -108,6 +113,7 @@ type GroupingKeyToMetricGroup map[string]MetricGroup
 
 // MetricGroup adds the grouping labels to a NameToTimestampedMetricFamilyMap.
 type MetricGroup struct {
+	Lock    sync.RWMutex // Protects Metrics
 	Labels  map[string]string
 	Metrics NameToTimestampedMetricFamilyMap
 }
@@ -151,7 +157,7 @@ type NameToTimestampedMetricFamilyMap map[string]TimestampedMetricFamily
 // TimestampedMetricFamily adds the push timestamp to a gobbable version of the
 // MetricFamily-DTO.
 type TimestampedMetricFamily struct {
-	Timestamp            time.Time
+	Timestamp            time.Time // writeRequest中的timestamp
 	GobbableMetricFamily *GobbableMetricFamily
 }
 

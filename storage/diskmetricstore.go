@@ -17,7 +17,9 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"path"
 	"sort"
@@ -39,7 +41,7 @@ const (
 	pushMetricHelp       = "Last Unix time when changing this group in the Pushgateway succeeded."
 	pushFailedMetricName = "push_failure_time_seconds"
 	pushFailedMetricHelp = "Last Unix time when changing this group in the Pushgateway failed."
-	writeQueueCapacity   = 1000
+	writeQueueCapacity   = 4096
 )
 
 var errTimestamp = errors.New("pushed metrics must not have timestamps")
@@ -48,7 +50,8 @@ var errTimestamp = errors.New("pushed metrics must not have timestamps")
 // disk.
 type DiskMetricStore struct {
 	lock            sync.RWMutex // Protects metricFamilies.
-	writeQueue      chan WriteRequest
+	writeQueues     []chan WriteRequest
+	processNum      int
 	drain           chan struct{}
 	done            chan error
 	metricGroups    GroupingKeyToMetricGroup
@@ -80,11 +83,12 @@ func NewDiskMetricStore(
 	persistenceInterval time.Duration,
 	gatherPredefinedHelpFrom prometheus.Gatherer,
 	logger log.Logger,
+	processNum int,
 ) *DiskMetricStore {
 	// TODO: Do that outside of the constructor to allow the HTTP server to
 	//  serve /-/healthy and /-/ready earlier.
 	dms := &DiskMetricStore{
-		writeQueue:      make(chan WriteRequest, writeQueueCapacity),
+		processNum:      processNum,
 		drain:           make(chan struct{}),
 		done:            make(chan error),
 		metricGroups:    GroupingKeyToMetricGroup{},
@@ -100,19 +104,71 @@ func NewDiskMetricStore(
 		level.Error(logger).Log("msg", "could not gather metrics for predefined help strings", "err", err)
 	}
 
-	go dms.loop(persistenceInterval)
+	dms.writeQueues = make([]chan WriteRequest, processNum, processNum)
+	for i := 0; i < processNum; i++ {
+		dms.writeQueues[i] = make(chan WriteRequest, writeQueueCapacity)
+		go dms.loop(dms.writeQueues[i])
+	}
+	go dms.doPersist(persistenceInterval)
 	return dms
+}
+
+// String hashes a string to a unique hashcode.
+//
+// crc32 returns a uint32, but for our use we need
+// and non negative integer. Here we cast to an integer
+// and invert it if the result is negative.
+func hash(s string) int {
+	v := int(crc32.ChecksumIEEE([]byte(s)))
+	if v >= 0 {
+		return v
+	}
+	if -v >= 0 {
+		return -v
+	}
+	// v == MinInt
+	return 0
+}
+
+func (dms *DiskMetricStore) SubmitWriteRequestFromJob(job string, req WriteRequest) {
+	num := rand.Intn(hash(job) % dms.processNum)
+	select {
+	case dms.writeQueues[num] <- req:
+	default:
+		for _, mf := range req.MetricFamilies {
+			fmt.Printf("recv_push_metric: writeQueue full, so drop write request! ts:%s, metric_name:%s, metrics_len:%d\n",
+				req.Timestamp.String(), mf.Name, len(mf.Metric))
+		}
+		level.Info(dms.logger).Log("msg", "writeQueue full, so drop write request!", "req", req)
+	}
 }
 
 // SubmitWriteRequest implements the MetricStore interface.
 func (dms *DiskMetricStore) SubmitWriteRequest(req WriteRequest) {
-	dms.writeQueue <- req
+	num := rand.Intn(dms.processNum)
+	select {
+	case dms.writeQueues[num] <- req:
+	default:
+		for _, mf := range req.MetricFamilies {
+			fmt.Printf("recv_push_metric: writeQueue full, so drop write request! ts:%s, metric_name:%s, metrics_len:%d\n",
+				req.Timestamp.String(), mf.Name, len(mf.Metric))
+		}
+		level.Info(dms.logger).Log("msg", "writeQueue full, so drop write request!", "req", req)
+	}
 }
 
 // Shutdown implements the MetricStore interface.
 func (dms *DiskMetricStore) Shutdown() error {
 	close(dms.drain)
 	return <-dms.done
+}
+
+func (dms *DiskMetricStore) ToProcessPushItem() int {
+	ret := 0
+	for i := 0; i < dms.processNum; i++ {
+		ret += len(dms.writeQueues[i])
+	}
+	return ret
 }
 
 // Healthy implements the MetricStore interface.
@@ -123,10 +179,11 @@ func (dms *DiskMetricStore) Healthy() error {
 
 	// A pushgateway that cannot be written to should not be
 	// considered as healthy.
-	if len(dms.writeQueue) == cap(dms.writeQueue) {
-		return fmt.Errorf("write queue is full")
+	for i := 0; i < dms.processNum; i++ {
+		if len(dms.writeQueues[i]) == cap(dms.writeQueues[i]) {
+			return fmt.Errorf("write queue is full, id:%d", i)
+		}
 	}
-
 	return nil
 }
 
@@ -136,15 +193,18 @@ func (dms *DiskMetricStore) Ready() error {
 }
 
 // GetMetricFamilies implements the MetricStore interface.
-func (dms *DiskMetricStore) GetMetricFamilies() []*dto.MetricFamily {
-	dms.lock.RLock()
-	defer dms.lock.RUnlock()
+func (dms *DiskMetricStore) GetMetricFamilies(lastSec int) []*dto.MetricFamily {
+	tmpDms := dms.GetMetricFamiliesMapLastSec(lastSec)
 
 	result := []*dto.MetricFamily{}
 	mfStatByName := map[string]mfStat{}
 
-	for _, group := range dms.metricGroups {
+	for _, group := range tmpDms {
 		for name, tmf := range group.Metrics {
+			if lastSec > 0 && time.Now().Sub(tmf.Timestamp) > time.Duration(lastSec)*time.Second {
+				continue
+			}
+
 			mf := tmf.GetMetricFamily()
 			if mf == nil {
 				level.Warn(dms.logger).Log("msg", "storage corruption detected, consider wiping the persistence file")
@@ -186,6 +246,29 @@ func (dms *DiskMetricStore) GetMetricFamilies() []*dto.MetricFamily {
 	return result
 }
 
+func (dms *DiskMetricStore) GetMetricFamiliesMapLastSec(lastSec int) GroupingKeyToMetricGroup {
+	dms.lock.RLock()
+	defer dms.lock.RUnlock()
+	groupsCopy := GroupingKeyToMetricGroup{}
+	for k, g := range dms.metricGroups {
+		metricsCopy := make(NameToTimestampedMetricFamilyMap, len(g.Metrics))
+		isValid := false
+		for n, tmf := range g.Metrics {
+			level.Info(dms.logger).Log("debug", fmt.Sprintf("metric_name:%s, ts:%s", n, tmf.Timestamp.String()))
+			if time.Now().Sub(tmf.Timestamp) <= time.Duration(lastSec)*time.Second {
+				if !isValid {
+					isValid = true
+				}
+				metricsCopy[n] = tmf
+			}
+		}
+		if isValid {
+			groupsCopy[k] = MetricGroup{Labels: g.Labels, Metrics: metricsCopy}
+		}
+	}
+	return groupsCopy
+}
+
 // GetMetricFamiliesMap implements the MetricStore interface.
 func (dms *DiskMetricStore) GetMetricFamiliesMap() GroupingKeyToMetricGroup {
 	dms.lock.RLock()
@@ -195,41 +278,46 @@ func (dms *DiskMetricStore) GetMetricFamiliesMap() GroupingKeyToMetricGroup {
 		metricsCopy := make(NameToTimestampedMetricFamilyMap, len(g.Metrics))
 		groupsCopy[k] = MetricGroup{Labels: g.Labels, Metrics: metricsCopy}
 		for n, tmf := range g.Metrics {
-			metricsCopy[n] = tmf
+			metricsCopy[n] = tmf // 引用了dto.MetricFamily指针，要保证 dto.MetricFamily 对象内部的成员在别的协程不能被修改。
 		}
 	}
 	return groupsCopy
 }
 
-func (dms *DiskMetricStore) loop(persistenceInterval time.Duration) {
-	lastPersist := time.Now()
-	persistScheduled := false
-	lastWrite := time.Time{}
-	persistDone := make(chan time.Time)
-	var persistTimer *time.Timer
-
-	checkPersist := func() {
-		if dms.persistenceFile != "" && !persistScheduled && lastWrite.After(lastPersist) {
-			persistTimer = time.AfterFunc(
-				persistenceInterval-lastWrite.Sub(lastPersist),
-				func() {
-					persistStarted := time.Now()
-					if err := dms.persist(); err != nil {
-						level.Error(dms.logger).Log("msg", "error persisting metrics", "err", err)
-					} else {
-						level.Info(dms.logger).Log("msg", "metrics persisted", "file", dms.persistenceFile)
-					}
-					persistDone <- persistStarted
-				},
-			)
-			persistScheduled = true
-		}
+func (dms *DiskMetricStore) doPersist(persistenceInterval time.Duration) {
+	if dms.persistenceFile != "" {
+		tick := time.NewTicker(persistenceInterval)
+		go func() {
+			defer tick.Stop()
+			for {
+				var (
+					err   error
+					drain bool
+				)
+				select {
+				case <-tick.C:
+					err = dms.persist()
+				case <-dms.drain:
+					drain = true
+					err = dms.persist()
+				}
+				if err != nil {
+					level.Error(dms.logger).Log("msg", "error persisting metrics", "err", err)
+				} else {
+					level.Info(dms.logger).Log("msg", "metrics persisted", "file", dms.persistenceFile)
+				}
+				if drain {
+					return
+				}
+			}
+		}()
 	}
+}
 
+func (dms *DiskMetricStore) loop(ch chan WriteRequest) {
 	for {
 		select {
-		case wr := <-dms.writeQueue:
-			lastWrite = time.Now()
+		case wr := <-ch:
 			if dms.checkWriteRequest(wr) {
 				dms.processWriteRequest(wr)
 			} else {
@@ -238,58 +326,70 @@ func (dms *DiskMetricStore) loop(persistenceInterval time.Duration) {
 			if wr.Done != nil {
 				close(wr.Done)
 			}
-			checkPersist()
-		case lastPersist = <-persistDone:
-			persistScheduled = false
-			checkPersist() // In case something has been written in the meantime.
 		case <-dms.drain:
-			// Prevent a scheduled persist from firing later.
-			if persistTimer != nil {
-				persistTimer.Stop()
-			}
-			// Now draining...
-			for {
-				select {
-				case wr := <-dms.writeQueue:
-					dms.processWriteRequest(wr)
-				default:
-					dms.done <- dms.persist()
-					return
-				}
-			}
+			//// Prevent a scheduled persist from firing later.
+			//if persistTimer != nil {
+			//	persistTimer.Stop()
+			//}
+			//// Now draining...
+			//for {
+			//	select {
+			//	case wr := <-dms.writeQueue:
+			//		dms.processWriteRequest(wr)
+			//	default:
+			//		dms.done <- dms.persist()
+			//		return
+			//	}
+			//}
+			return
 		}
 	}
 }
 
-func (dms *DiskMetricStore) processWriteRequest(wr WriteRequest) {
+func (dms *DiskMetricStore) ClearStore() {
+	fmt.Printf("ts:%s, clear store!\n", time.Now().Format("2006-01-02 15:04:05"))
 	dms.lock.Lock()
 	defer dms.lock.Unlock()
+	dms.metricGroups = GroupingKeyToMetricGroup{}
+}
+
+func (dms *DiskMetricStore) processWriteRequest(wr WriteRequest) {
+	// 将wr中的metric数据 拷贝进 dms
+	dms.lock.Lock()
+	//defer dms.lock.Unlock()
 
 	key := groupingKeyFor(wr.Labels)
-
 	if wr.MetricFamilies == nil {
 		// No MetricFamilies means delete request. Delete the whole
 		// metric group, and we are done here.
 		delete(dms.metricGroups, key)
+		dms.lock.Unlock()
 		return
 	}
 	// Otherwise, it's an update.
 	group, ok := dms.metricGroups[key]
+	if ok {
+		dms.lock.Unlock()
+	}
 	if !ok {
 		group = MetricGroup{
 			Labels:  wr.Labels,
 			Metrics: NameToTimestampedMetricFamilyMap{},
 		}
 		dms.metricGroups[key] = group
+		dms.lock.Unlock()
 	} else if wr.Replace {
 		// For replace, we have to delete all metric families in the
 		// group except pre-existing push timestamps.
+		// bzh: 如果group key已存在，则会删除 这个group key下的所有metric数据。why?
 		for name := range group.Metrics {
 			if name != pushMetricName && name != pushFailedMetricName {
 				delete(group.Metrics, name)
 			}
 		}
 	}
+
+	group.Lock.Lock()
 	wr.MetricFamilies[pushMetricName] = newPushTimestampGauge(wr.Labels, wr.Timestamp)
 	// Only add a zero push-failed metric if none is there yet, so that a
 	// previously added fail timestamp is retained.
@@ -297,16 +397,19 @@ func (dms *DiskMetricStore) processWriteRequest(wr WriteRequest) {
 		wr.MetricFamilies[pushFailedMetricName] = newPushFailedTimestampGauge(wr.Labels, time.Time{})
 	}
 	for name, mf := range wr.MetricFamilies {
+		// 会覆盖这个metric name的所有数据。why???
+		// 多个实例，上报同一个metric name，就覆盖了？不会，labels[]中会加个job参数，每个实例上报的job是不同的。
+		// 如果有相同的，应尽量做数据归并? 不需要，因为客户端每次上报会累计历史数据metric。
 		group.Metrics[name] = TimestampedMetricFamily{
 			Timestamp:            wr.Timestamp,
 			GobbableMetricFamily: (*GobbableMetricFamily)(mf),
 		}
 	}
+	group.Lock.Unlock()
 }
 
 func (dms *DiskMetricStore) setPushFailedTimestamp(wr WriteRequest) {
 	dms.lock.Lock()
-	defer dms.lock.Unlock()
 
 	key := groupingKeyFor(wr.Labels)
 
@@ -318,7 +421,9 @@ func (dms *DiskMetricStore) setPushFailedTimestamp(wr WriteRequest) {
 		}
 		dms.metricGroups[key] = group
 	}
+	dms.lock.Unlock()
 
+	group.Lock.Lock()
 	group.Metrics[pushFailedMetricName] = TimestampedMetricFamily{
 		Timestamp:            wr.Timestamp,
 		GobbableMetricFamily: (*GobbableMetricFamily)(newPushFailedTimestampGauge(wr.Labels, wr.Timestamp)),
@@ -331,6 +436,7 @@ func (dms *DiskMetricStore) setPushFailedTimestamp(wr WriteRequest) {
 			GobbableMetricFamily: (*GobbableMetricFamily)(newPushTimestampGauge(wr.Labels, time.Time{})),
 		}
 	}
+	group.Lock.Unlock()
 }
 
 // checkWriteRequest return if applying the provided WriteRequest will result in
@@ -342,7 +448,7 @@ func (dms *DiskMetricStore) setPushFailedTimestamp(wr WriteRequest) {
 // Special case: If the WriteRequest has no Done channel set, the (expensive)
 // consistency check is skipped. The WriteRequest is still sanitized, and the
 // presence of timestamps still results in returning false.
-func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool {
+func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool { // bzh: 1, sanitize, 2: 一致性检查
 	if wr.MetricFamilies == nil {
 		// Delete request cannot create inconsistencies, and nothing has
 		// to be sanitized.
@@ -357,7 +463,7 @@ func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool {
 	}()
 
 	if timestampsPresent(wr.MetricFamilies) {
-		err = errTimestamp
+		err = errTimestamp // metricFamily中不能含有timestampMs
 		return false
 	}
 	for _, mf := range wr.MetricFamilies {
@@ -372,20 +478,21 @@ func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool {
 	// Construct a test dms, acting on a copy of the metrics, to test the
 	// WriteRequest with.
 	tdms := &DiskMetricStore{
-		metricGroups:   dms.GetMetricFamiliesMap(),
+		metricGroups:   dms.GetMetricFamiliesMap(), // diskStore 当前已存在的所有metric数据，复制一份（但是持有的是map引用，不能并发访问）
 		predefinedHelp: dms.predefinedHelp,
 		logger:         log.NewNopLogger(),
 	}
-	tdms.processWriteRequest(wr)
+	tdms.processWriteRequest(wr) // 将wr中的metric数据 拷贝进 tdms
 
 	// Construct a test Gatherer to check if consistent gathering is possible.
 	tg := prometheus.Gatherers{
-		prometheus.DefaultGatherer,
+		prometheus.DefaultGatherer, // 本地的register，用来收集PushGateway产生的metric数据
 		prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
-			return tdms.GetMetricFamilies(), nil
+			return tdms.GetMetricFamilies(0), nil
 		}),
 	}
 	if _, err = tg.Gather(); err != nil {
+		level.Info(dms.logger).Log("msg", "gather failed in DiskMatricStore", "err", err)
 		return false
 	}
 	return true
@@ -533,7 +640,7 @@ func newTimestampGauge(name, help string, groupingLabels map[string]string, t ti
 // Finally, sanitizeLabels sorts the label pairs of all metrics.
 func sanitizeLabels(mf *dto.MetricFamily, groupingLabels map[string]string) {
 	gLabelsNotYetDone := make(map[string]string, len(groupingLabels))
-
+	// 设置metric的label，把 预置的groupLabels、instanceLabel 覆盖进去。
 metric:
 	for _, m := range mf.GetMetric() {
 		for ln, lv := range groupingLabels {
